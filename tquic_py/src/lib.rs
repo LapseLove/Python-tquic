@@ -276,7 +276,7 @@ impl TransportHandler for ClientHandler {
 
     fn on_stream_readable(&mut self, conn: &mut Connection, stream_id: u64) {
         let mut buf: [u8; 65535]  = [0; 65535];
-        let mut buf_full = BytesMut::with_capacity(65535);
+        let mut buf_full = BytesMut::with_capacity(655350);
         while let Ok((r, fin)) = conn.stream_read(stream_id, &mut buf) {
             buf_full.extend_from_slice(&buf[..r]);
             if fin {
@@ -541,6 +541,7 @@ impl ServerEndpoint {
 
 struct ServerHandler{
     py_callbacks: PyQuicCallBacks,
+    recv_map: HashMap<u64, BytesMut>,
 }
 
 impl TransportHandler for ServerHandler {
@@ -584,39 +585,48 @@ impl TransportHandler for ServerHandler {
 
     fn on_stream_readable(&mut self, conn: &mut Connection, stream_id: u64) {
         let mut buf: [u8; 65535]  = [0; 65535];
-        let mut buf_full = BytesMut::with_capacity(655350);
         while let Ok((r, fin)) = conn.stream_read(stream_id, &mut buf) {
-            buf_full.extend_from_slice(&buf[..r]);
+            if !self.recv_map.contains_key(&stream_id){
+                let mut data_seg = BytesMut::with_capacity(655350);
+                data_seg.extend_from_slice(&buf[..r]);
+                self.recv_map.insert(stream_id, data_seg);
+            } else {
+                let existing_data = self.recv_map.get_mut(&stream_id).unwrap();
+                existing_data.extend_from_slice(&buf[..r]);
+            }
+            debug!("Server received {} bytes on stream {}", r, stream_id);
             if fin {
+                if self.py_callbacks.on_stream_readable_callback.is_some() {
+                    let data = self.recv_map.remove(&stream_id).unwrap().freeze();
+                    println!("Server received {} bytes on stream {}", data.len(), stream_id);
+                    Python::with_gil(|py| {
+                        let callback = self.py_callbacks.on_stream_readable_callback.as_ref().unwrap();
+                        let py_bytes = PyBytes::new(py, &data.as_ref());
+                        match callback.call1(py, (conn.index().unwrap(), stream_id, py_bytes)){
+                            Ok(response) => {
+                                if response.is_none(py) {
+                                    return;
+                                }
+                                if let Ok(response_bytes) = response.extract::<Vec<u8>>(py) {
+                                debug!("[Rust] 从 Python 拿到 {} 字节，准备发送...", response_bytes.len());
+                                match conn.stream_write(stream_id, Bytes::copy_from_slice(&response_bytes), true) {
+                                    Ok(written) => debug!("[Rust] 成功发送 {} 字节", written),
+                                    Err(e) => error!("[Rust] 发送失败: {:?}", e),
+                                }
+                                } else {
+                                    error!("[Rust] Python 回调返回了非 bytes 类型的数据！");
+                                }
+                            },
+                            Err(e) => {
+                                error!("Error in on_stream_readable_callback: {:?}", e);
+                            }
+                        }
+                    });
+                }
                 break;
             }
         }
-        if self.py_callbacks.on_stream_readable_callback.is_some() {
-            let data = buf_full.freeze();
-            Python::with_gil(|py| {
-                let callback = self.py_callbacks.on_stream_readable_callback.as_ref().unwrap();
-                let py_bytes = PyBytes::new(py, &data.as_ref());
-                match callback.call1(py, (conn.index().unwrap(), stream_id, py_bytes)){
-                    Ok(response) => {
-                        if response.is_none(py) {
-                            return;
-                        }
-                        if let Ok(response_bytes) = response.extract::<Vec<u8>>(py) {
-                        println!("[Rust] 从 Python 拿到 {} 字节，准备发送...", response_bytes.len());
-                        match conn.stream_write(stream_id, Bytes::copy_from_slice(&response_bytes), true) {
-                            Ok(written) => println!("[Rust] 成功发送 {} 字节", written),
-                            Err(e) => eprintln!("[Rust] 发送失败: {:?}", e),
-                        }
-                        } else {
-                            eprintln!("[Rust] Python 回调返回了非 bytes 类型的数据！");
-                        }
-                    },
-                    Err(e) => {
-                        error!("Error in on_stream_readable_callback: {:?}", e);
-                    }
-                }
-            });
-        }
+        
     }
 
     fn on_stream_writable(&mut self, conn: &mut Connection, stream_id: u64) {
@@ -694,6 +704,7 @@ fn quic_server_create(bind_addr: String, pycallbacks: PyQuicCallBacks) -> PyResu
     sock.set_nonblocking(true).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to set non-blocking: {}", e)))?;
     let handler = ServerHandler{
         py_callbacks: pycallbacks,
+        recv_map: HashMap::new(),
     };
     let packetsender = Rc::new(ClientPacketSender::new(sock));
 

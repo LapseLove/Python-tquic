@@ -216,7 +216,7 @@ impl CongestionController for SQP {
         // Update Bandwidth Sampling and Pacing Rate
         if !self.frame_size.is_empty() {
             let frame_size = self.frame_size.front().unwrap();
-            println!("self.frame_size: {}", frame_size);
+            // println!("self.frame_size: {}", frame_size);
             if let Some(start_send_time) = self.first_packet_sent_time {
                 if start_send_time <= packet.time_sent {
                     if self.acked_bytes_in_total == 0 {
