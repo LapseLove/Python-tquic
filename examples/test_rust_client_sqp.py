@@ -7,6 +7,11 @@ import os
 def on_conn_created(conn_id):
     print("New connection created with ID:", conn_id)
 
+def on_conn_established(conn_id):
+    global init
+    print("Connection established with ID:", conn_id)
+    init = True
+
 def on_stream_readable(conn_id, stream_id, data):
     global Pyendpoint, response_map
     # print("Client received data on connection {}, stream {}: data: {}".format(conn_id, stream_id, data))
@@ -23,8 +28,8 @@ def process_cmd(Pyendpoint):
         if w > 0:
             # print("write size: {} bytes".format(w))
             # print("Application sent data of size: {} bytes".format(len(payload)))
-            if init == False:
-                init = True
+            # if init == False:
+            #     init = True
             flag += 1
             response_map[stream_id] = 1
             stream_id += 4
@@ -58,7 +63,8 @@ def main():
     sel.register(py_sock, selectors.EVENT_READ, socket_on_recv)
     while True:
         Pyendpoint.quic_process_connections()
-        process_cmd(Pyendpoint)
+        if init:
+            process_cmd(Pyendpoint)
         if check_responses_empty(Pyendpoint):
             break
         events = sel.select(Pyendpoint.get_quic_timeout().total_seconds())
@@ -72,6 +78,7 @@ if __name__ == "__main__":
     pycallback = tquic_py.PyQuicCallBacks()
     pycallback.set_on_stream_readable_callback(on_stream_readable)
     pycallback.set_on_conn_created_callback(on_conn_created)
+    pycallback.set_on_conn_established_callback(on_conn_established)
     Pyendpoint = tquic_py.quic_client_create(pycallback)
     Pyendpoint.connect(f"{SERVER_IP}:8443")
     print("Connecting to server at {}:8443".format(SERVER_IP))
